@@ -6,7 +6,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
-COPY server.js ./
+COPY app.js server.js ./
 
 ARG GIT_SHA=dev
 ENV GIT_SHA=${GIT_SHA}

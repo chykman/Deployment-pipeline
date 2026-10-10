@@ -1,0 +1,97 @@
+name: CI
+
+# Runs on GitHub-hosted runners ONLY. Never run pull-request code on the
+# self-hosted runner: that VM has Docker access and holds your deploy secrets.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfiles (hadolint)
+        run: |
+          docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold warning - < api/Dockerfile
+          docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold warning - < web/Dockerfile
+
+      - name: Lint workflows (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color
+
+      - name: Validate docker-compose.yml
+        run: POSTGRES_PASSWORD=ci-only docker compose config --quiet
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: app
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U app -d app"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGUSER: app
+      PGPASSWORD: ci-only
+      PGDATABASE: app
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: api/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  build-and-scan:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images
+        run: |
+          docker build -t dp-api:ci ./api
+          docker build -t dp-web:ci ./web
+
+      - name: Scan api image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: dp-api:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan web image (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: dp-web:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"

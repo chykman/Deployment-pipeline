@@ -1,0 +1,53 @@
+name: Deploy to Vagrant VM
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never run two deployments at once; queue instead of cancelling mid-deploy
+concurrency:
+  group: deploy-vagrant
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, vagrant]
+    timeout-minutes: 15
+    env:
+      GIT_SHA: ${{ github.sha }}
+      COMPOSE_PROJECT_NAME: deployment-pipeline
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Docker sanity check
+        run: |
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+
+      # Layer cache lives on the VM's Docker daemon, so rebuilds are fast
+      # with no extra caching config.
+      - name: Build image
+        run: docker compose build --pull
+
+      - name: Stop and remove old container
+        run: docker compose down --remove-orphans
+
+      - name: Start new container
+        run: docker compose up -d
+
+      - name: Verify the new commit is live
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:8080/version.txt | grep -q "$GIT_SHA"; then
+              echo "Deployed $GIT_SHA"; exit 0
+            fi
+            sleep 2
+          done
+          echo "Health check failed"; docker compose ps; docker compose logs --tail=50
+          exit 1
+
+      - name: Clean up dangling images
+        if: always()
+        run: docker image prune -f

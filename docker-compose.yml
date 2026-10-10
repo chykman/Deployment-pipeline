@@ -1,0 +1,11 @@
+services:
+  web:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
+    image: deployment-pipeline-web:latest
+    container_name: deployment-pipeline-web
+    ports:
+      - "8080:80"
+    restart: unless-stopped

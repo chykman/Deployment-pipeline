@@ -1,11 +1,48 @@
 services:
-  web:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_DB: app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD (GitHub repo secret, or export it locally)}
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    # No published port: only the api container can reach the database.
+
+  api:
     build:
-      context: .
+      context: ./api
       args:
         GIT_SHA: ${GIT_SHA:-dev}
-    image: deployment-pipeline-web:latest
-    container_name: deployment-pipeline-web
+    environment:
+      PGHOST: db
+      PGUSER: app
+      PGDATABASE: app
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      GIT_SHA: ${GIT_SHA:-dev}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    # No published port: reached through nginx at /api/
+
+  web:
+    build:
+      context: ./web
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     ports:
       - "8080:80"
+    depends_on:
+      api:
+        condition: service_started
     restart: unless-stopped
+
+volumes:
+  dbdata:

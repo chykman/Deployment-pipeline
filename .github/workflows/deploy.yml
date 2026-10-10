@@ -13,40 +13,69 @@ concurrency:
 jobs:
   deploy:
     runs-on: [self-hosted, linux, vagrant]
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       GIT_SHA: ${{ github.sha }}
       COMPOSE_PROJECT_NAME: deployment-pipeline
+      POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
     steps:
       - name: Check out repo
         uses: actions/checkout@v4
+
+      - name: Check required secret
+        run: |
+          if [ -z "$POSTGRES_PASSWORD" ]; then
+            echo "::error::Repo secret POSTGRES_PASSWORD is missing (Settings > Secrets and variables > Actions)"
+            exit 1
+          fi
 
       - name: Docker sanity check
         run: |
           docker version --format '{{.Server.Version}}'
           docker compose version
+          docker compose config --quiet
 
-      # Layer cache lives on the VM's Docker daemon, so rebuilds are fast
-      # with no extra caching config.
-      - name: Build image
+      # Layer cache lives on the VM's Docker daemon, so unchanged layers
+      # (e.g. npm ci) are reused between runs.
+      - name: Build images
         run: docker compose build --pull
 
-      - name: Stop and remove old container
+      # No -v: the database volume (dbdata) survives every deploy.
+      - name: Stop and remove old containers
         run: docker compose down --remove-orphans
 
-      - name: Start new container
-        run: docker compose up -d
+      - name: Start new containers
+        run: docker compose up -d --wait --wait-timeout 120
 
       - name: Verify the new commit is live
         run: |
           for i in $(seq 1 20); do
             if curl -fsS http://localhost:8080/version.txt | grep -q "$GIT_SHA"; then
-              echo "Deployed $GIT_SHA"; exit 0
+              echo "Frontend is serving $GIT_SHA"; break
             fi
+            if [ "$i" = 20 ]; then echo "Frontend never served $GIT_SHA"; docker compose logs --tail=50; exit 1; fi
             sleep 2
           done
-          echo "Health check failed"; docker compose ps; docker compose logs --tail=50
-          exit 1
+          curl -fsS http://localhost:8080/api/health
+          echo
+          curl -fsS http://localhost:8080/api/info | jq .
+
+      - name: API and database smoke test
+        run: |
+          ID=$(curl -fsS -X POST -H 'Content-Type: application/json' \
+                 -d "{\"title\":\"smoke test $GIT_SHA\"}" http://localhost:8080/api/tasks | jq -r .id)
+          echo "Created task $ID"
+          curl -fsS http://localhost:8080/api/tasks | jq -e --argjson id "$ID" 'map(.id) | index($id) != null' >/dev/null
+          curl -fsS -X DELETE "http://localhost:8080/api/tasks/$ID" -o /dev/null
+          echo "Smoke test passed"
+
+      - name: Show container status
+        if: always()
+        run: docker compose ps
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs --tail=100
 
       - name: Clean up dangling images
         if: always()
